@@ -24,9 +24,40 @@ class TelegramWebhookController extends Controller
         $chat = $message['chat'] ?? [];
         $from = $message['from'] ?? [];
         $text = trim($message['text'] ?? '');
+        $chatId = (string) ($chat['id'] ?? '');
 
         if (str_starts_with($text, '/start')) {
             return $this->startAccount($chat, $from);
+        }
+
+        if ($text === '🆕 New Token') {
+            $this->sendMessage($chatId, '🆕 New Token selected');
+            return response()->json(['ok' => true]);
+        }
+
+        if ($text === '🔑 My Tokens') {
+            $this->sendMessage($chatId, '🔑 My Tokens selected');
+            return response()->json(['ok' => true]);
+        }
+
+        if ($text === '🌐 Domains') {
+            $this->sendMessage($chatId, '🌐 Domains selected');
+            return response()->json(['ok' => true]);
+        }
+
+        if ($text === '💬 Support') {
+            $this->sendMessage($chatId, '💬 Support selected');
+            return response()->json(['ok' => true]);
+        }
+
+        if ($text === '🔒 Privacy Policy') {
+            $this->sendMessage($chatId, 'https://yourdomain.com/privacy');
+            return response()->json(['ok' => true]);
+        }
+
+        if ($text === '📜 Terms of Service') {
+            $this->sendMessage($chatId, 'https://yourdomain.com/terms');
+            return response()->json(['ok' => true]);
         }
 
         if (str_starts_with($text, '/connect')) {
@@ -67,7 +98,7 @@ class TelegramWebhookController extends Controller
             ]
         );
 
-        $this->sendMessage(
+        $this->sendMainMenu(
             $chatId,
             "✅ Account ready!\n\nHello {$firstName}\nTelegram ID: {$telegramId}"
         );
@@ -77,6 +108,33 @@ class TelegramWebhookController extends Controller
             'user_id' => $user->id,
             'uuid' => $user->uuid,
             'telegram_id' => $telegramId,
+        ]);
+    }
+
+    private function sendMainMenu($chatId, string $text = 'Menu')
+    {
+        return $this->telegramApi('sendMessage', [
+            'chat_id' => $chatId,
+            'text' => $text,
+            'reply_markup' => [
+                'keyboard' => [
+                    [
+                        ['text' => '🆕 New Token'],
+                        ['text' => '🔑 My Tokens'],
+                    ],
+                    [
+                        ['text' => '🌐 Domains'],
+                        ['text' => '💬 Support'],
+                    ],
+                    [
+                        ['text' => '🔒 Privacy Policy'],
+                        ['text' => '📜 Terms of Service'],
+                    ],
+                ],
+                'resize_keyboard' => true,
+                'one_time_keyboard' => false,
+                'is_persistent' => true,
+            ],
         ]);
     }
 
@@ -162,52 +220,6 @@ class TelegramWebhookController extends Controller
         $this->sendMessage($chatId, "✅ Group connected successfully!\nGroup: {$chatTitle}");
 
         return response()->json(['ok' => true]);
-    }
-
-    public function testConnect(Request $request)
-    {
-        if (!app()->environment('local')) {
-            abort(404);
-        }
-    
-        $key = $request->query('key');
-    
-        if (!$key) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Missing key'
-            ], 422);
-        }
-    
-        $chatId = '-1003752923861';
-    
-        $this->sendMessage(
-            $chatId,
-            "🧪 Testing subscription key: {$key}"
-        );
-    
-        return response()->json([
-            'success' => true,
-            'chat_id' => $chatId,
-            'key' => $key,
-        ]);
-    }
-    public function getUpdates()
-    {
-        if (!app()->environment('local')) {
-            abort(404);
-        }
-
-        return $this->telegramApi('getUpdates');
-    }
-
-    public function deleteWebhook()
-    {
-        if (!app()->environment('local')) {
-            abort(404);
-        }
-
-        return $this->telegramApi('deleteWebhook');
     }
 
     public function webhookInfo()
