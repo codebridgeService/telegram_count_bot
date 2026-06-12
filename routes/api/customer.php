@@ -13,6 +13,8 @@ use App\Http\Controllers\Api\UserSubscriptionController;
 |--------------------------------------------------------------------------
 */
 
+Route::post('telegram-payment/webhook', [TelegramPaymentWebhookController::class, 'webhook']);
+
 /*
 |--------------------------------------------------------------------------
 | Customer Routes
