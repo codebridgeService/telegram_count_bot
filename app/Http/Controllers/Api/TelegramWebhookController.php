@@ -72,82 +72,85 @@ class TelegramWebhookController extends Controller
 
         return response()->json(['ok' => true]);
     }
-
     private function storeAbaPayment(Request $request, string $text)
     {
         try {
             $telegramUserId = (string) $request->input('message.from.id');
-
+            $telegramChatId = (string) $request->input('message.chat.id');
+    
             $user = User::where('telegram_id', $telegramUserId)->first();
-
-            if (!$user) {
-                return response()->json([
-                    'ok' => false,
-                    'message' => 'User not found by telegram_id',
-                    'telegram_user_id' => $telegramUserId,
-                ], 404);
+    
+            $subscription = null;
+            $group = null;
+    
+            if ($user) {
+                $subscription = UserSubscription::where('user_id', $user->uuid)
+                    ->where('status', 'active')
+                    ->latest()
+                    ->first();
+    
+                if ($subscription) {
+                    $group = TelegramGroup::where('user_id', $user->uuid)
+                        ->where('subscription_id', $subscription->userSubscriptionsID)
+                        ->where('status', 'connected')
+                        ->latest()
+                        ->first();
+                }
             }
-
-            $subscription = UserSubscription::where('user_id', $user->uuid)
-                ->where('status', 'active')
-                ->latest()
-                ->first();
-
-            if (!$subscription) {
-                return response()->json([
-                    'ok' => false,
-                    'message' => 'Active subscription not found',
-                    'user_id' => $user->uuid,
-                ], 404);
+    
+            if (!$user || !$subscription || !$group) {
+                $this->sendMessage(
+                    $telegramChatId,
+                    "⚠️ Payment saved with missing link.\n\n"
+                    . "User: " . ($user ? 'FOUND' : 'NULL') . "\n"
+                    . "Subscription: " . ($subscription ? 'FOUND' : 'NULL') . "\n"
+                    . "Group: " . ($group ? 'FOUND' : 'NULL') . "\n\n"
+                    . "Telegram User ID: {$telegramUserId}\n"
+                    . "Telegram Chat ID: {$telegramChatId}"
+                );
             }
-
-            $group = TelegramGroup::where('user_id', $user->uuid)
-                ->where('subscription_id', $subscription->userSubscriptionsID)
-                ->where('status', 'connected')
-                ->latest()
-                ->first();
-
+    
             preg_match(
                 '/^(?<currency>៛|\$)?(?<amount>[\d,.]+)\s+paid by\s+(?<payer_name>.*?)\s+\((?<payer_account>.*?)\)\s+on\s+(?<date>.*?)\s+via\s+(?<method>.*?)\s+at\s+(?<merchant>.*?)\.\s+Trx\. ID:\s+(?<trx_id>\d+),\s+APV:\s+(?<apv>\d+)/u',
                 $text,
                 $match
             );
-
+    
             if (!$match) {
                 $payment = TelegramPayment::create([
-                    'user_id' => $user->uuid,
-                    'subscription_id' => $subscription->userSubscriptionsID,
+                    'user_id' => $user?->uuid,
+                    'subscription_id' => $subscription?->userSubscriptionsID,
                     'telegram_group_id' => $group?->telegramGroupsID,
                     'raw_message' => $text,
                     'status' => 'pending',
                     'parsed_successfully' => false,
                     'is_duplicate' => false,
                 ]);
-
+    
                 return response()->json([
                     'ok' => true,
                     'message' => 'Text saved but not parsed',
                     'data' => $payment,
                 ]);
             }
-
+    
             try {
                 $paymentDate = Carbon::createFromFormat('M d, h:i A', trim($match['date']))
                     ->year(now()->year);
             } catch (\Throwable $e) {
                 $paymentDate = now();
             }
-
+    
             $trxId = trim($match['trx_id']);
             $existingPayment = TelegramPayment::where('trx_id', $trxId)->first();
-
+    
             $payment = TelegramPayment::updateOrCreate(
                 ['trx_id' => $trxId],
                 [
-                    'user_id' => $user->uuid,
-                    'subscription_id' => $subscription->userSubscriptionsID,
+                    'user_id' => $user?->uuid,
+                    'subscription_id' => $subscription?->userSubscriptionsID,
                     'telegram_group_id' => $group?->telegramGroupsID,
-
+    
                     'currency' => $match['currency'] === '៛' ? 'KHR' : 'USD',
                     'amount' => str_replace(',', '', $match['amount']),
                     'payer_name' => trim($match['payer_name']),
@@ -167,14 +170,17 @@ class TelegramWebhookController extends Controller
                     'is_duplicate' => $existingPayment ? true : false,
                 ]
             );
-
+    
             $group?->update([
                 'last_payment_at' => now(),
             ]);
-
+    
             return response()->json([
                 'ok' => true,
                 'message' => 'ABA payment saved',
+                'found_user' => (bool) $user,
+                'found_subscription' => (bool) $subscription,
+                'found_group' => (bool) $group,
                 'data' => $payment,
             ]);
         } catch (\Throwable $e) {
@@ -183,7 +189,7 @@ class TelegramWebhookController extends Controller
                 'line' => $e->getLine(),
                 'file' => $e->getFile(),
             ]);
-
+    
             return response()->json([
                 'ok' => false,
                 'message' => $e->getMessage(),
