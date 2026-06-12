@@ -75,38 +75,24 @@ class TelegramWebhookController extends Controller
     private function storeAbaPayment(Request $request, string $text)
     {
         try {
-            $telegramUserId = (string) $request->input('message.from.id');
             $telegramChatId = (string) $request->input('message.chat.id');
     
-            $user = User::where('telegram_id', $telegramUserId)->first();
+            $group = TelegramGroup::where('group_id', $telegramChatId)
+                ->where('status', 'connected')
+                ->latest()
+                ->first();
     
-            $subscription = null;
-            $group = null;
+            $userId = $group?->user_id;
+            $subscriptionId = $group?->subscription_id;
+            $telegramGroupId = $group?->telegramGroupsID;
     
-            if ($user) {
-                $subscription = UserSubscription::where('user_id', $user->uuid)
-                    ->where('status', 'active')
-                    ->latest()
-                    ->first();
-    
-                if ($subscription) {
-                    $group = TelegramGroup::where('user_id', $user->uuid)
-                        ->where('subscription_id', $subscription->userSubscriptionsID)
-                        ->where('status', 'connected')
-                        ->latest()
-                        ->first();
-                }
-            }
-    
-            if (!$user || !$subscription || !$group) {
+            if (!$group) {
                 $this->sendMessage(
                     $telegramChatId,
-                    "⚠️ Payment saved with missing link.\n\n"
-                    . "User: " . ($user ? 'FOUND' : 'NULL') . "\n"
-                    . "Subscription: " . ($subscription ? 'FOUND' : 'NULL') . "\n"
-                    . "Group: " . ($group ? 'FOUND' : 'NULL') . "\n\n"
-                    . "Telegram User ID: {$telegramUserId}\n"
-                    . "Telegram Chat ID: {$telegramChatId}"
+                    "⚠️ Payment received but group is not connected.\n\n"
+                    . "Telegram Chat ID: {$telegramChatId}\n\n"
+                    . "Please connect this group first:\n"
+                    . "/connect YOUR_SUBSCRIPTION_KEY"
                 );
             }
     
@@ -118,9 +104,9 @@ class TelegramWebhookController extends Controller
     
             if (!$match) {
                 $payment = TelegramPayment::create([
-                    'user_id' => $user?->uuid,
-                    'subscription_id' => $subscription?->userSubscriptionsID,
-                    'telegram_group_id' => $group?->telegramGroupsID,
+                    'user_id' => $userId,
+                    'subscription_id' => $subscriptionId,
+                    'telegram_group_id' => $telegramGroupId,
                     'raw_message' => $text,
                     'status' => 'pending',
                     'parsed_successfully' => false,
@@ -130,6 +116,8 @@ class TelegramWebhookController extends Controller
                 return response()->json([
                     'ok' => true,
                     'message' => 'Text saved but not parsed',
+                    'telegram_chat_id' => $telegramChatId,
+                    'found_group' => (bool) $group,
                     'data' => $payment,
                 ]);
             }
@@ -147,9 +135,9 @@ class TelegramWebhookController extends Controller
             $payment = TelegramPayment::updateOrCreate(
                 ['trx_id' => $trxId],
                 [
-                    'user_id' => $user?->uuid,
-                    'subscription_id' => $subscription?->userSubscriptionsID,
-                    'telegram_group_id' => $group?->telegramGroupsID,
+                    'user_id' => $userId,
+                    'subscription_id' => $subscriptionId,
+                    'telegram_group_id' => $telegramGroupId,
     
                     'currency' => $match['currency'] === '៛' ? 'KHR' : 'USD',
                     'amount' => str_replace(',', '', $match['amount']),
@@ -178,9 +166,11 @@ class TelegramWebhookController extends Controller
             return response()->json([
                 'ok' => true,
                 'message' => 'ABA payment saved',
-                'found_user' => (bool) $user,
-                'found_subscription' => (bool) $subscription,
+                'telegram_chat_id' => $telegramChatId,
                 'found_group' => (bool) $group,
+                'user_id' => $userId,
+                'subscription_id' => $subscriptionId,
+                'telegram_group_id' => $telegramGroupId,
                 'data' => $payment,
             ]);
         } catch (\Throwable $e) {
