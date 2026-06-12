@@ -8,11 +8,8 @@ use Illuminate\Support\Str;
 class TelegramPayment extends Model
 {
     protected $table = 'telegram_payments';
-
     protected $primaryKey = 'telegram_paymentID';
-
     protected $keyType = 'string';
-
     public $incrementing = false;
 
     protected $fillable = [
@@ -55,21 +52,13 @@ class TelegramPayment extends Model
         return $this->belongsTo(User::class, 'user_id', 'uuid');
     }
 
-    public function subscription()
-    {
-        return $this->belongsTo(
-            UserSubscription::class,
-            'subscription_id',
-            'userSubscriptionsID'
-        );
-    }
-
     public function telegramGroup()
     {
-        return $this->belongsTo(
-            TelegramGroup::class,
-            'telegram_group_id',
-            'telegramGroupsID'
-        );
+        return $this->belongsTo(TelegramGroup::class, 'telegram_group_id', 'telegramGroupsID');
+    }
+
+    public function subscription()
+    {
+        return $this->belongsTo(UserSubscription::class, 'subscription_id', 'userSubscriptionsID');
     }
 }
