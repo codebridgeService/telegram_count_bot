@@ -1,16 +1,21 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
-
 use App\Http\Controllers\Api\TelegramWebhookController;
-use App\Http\Controllers\Api\TelegramPaymentWebhookController;
+use Illuminate\Support\Facades\Route;
 
 Route::prefix('telegram')->group(function () {
 
-    Route::post('/webhook', [TelegramWebhookController::class, 'webhook']);
+    // ── Webhook (called by Telegram) ──────────────────────────────────────────
+    Route::post('/webhook', [TelegramWebhookController::class, 'webhook'])
+        ->name('telegram.webhook');
 
+    // ── Utility (local/dev only — protect in production) ─────────────────────
+    Route::get('/set-webhook',  [TelegramWebhookController::class, 'setWebhook'])
+        ->name('telegram.set-webhook');
 
-    Route::get('/test', [TelegramWebhookController::class, 'testMessage']);
-    Route::get('/set-webhook', [TelegramWebhookController::class, 'setWebhook']);
-    Route::get('/webhook-info', [TelegramWebhookController::class, 'webhookInfo']);
+    Route::get('/webhook-info', [TelegramWebhookController::class, 'webhookInfo'])
+        ->name('telegram.webhook-info');
+
+    Route::get('/test',         [TelegramWebhookController::class, 'testMessage'])
+        ->name('telegram.test');
 });
