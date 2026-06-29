@@ -330,4 +330,5 @@ public function yearsWithData(string $groupId): array
         ->map(fn($v) => (int) $v)
         ->toArray();
 }
+
 }

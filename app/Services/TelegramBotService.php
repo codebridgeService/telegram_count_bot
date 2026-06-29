@@ -25,26 +25,57 @@ class TelegramBotService
     // Sending
     // -------------------------------------------------------------------------
 
-    public function sendMessage(string|int $chatId, string $text, array $extra = []): bool|array
+    public function sendMessage(string|int $chatId, string $text, array $options = []): bool|array
     {
-        $payload = [
-            'chat_id'    => $chatId,
-            'text'       => $text,
-            'parse_mode' => 'Markdown',
-        ];
-    
-        foreach ($extra as $key => $value) {
-            $payload[$key] = ($key === 'reply_markup' && is_array($value))
-                ? json_encode($value)
-                : $value;
+        $payload = array_merge([
+            'chat_id' => $chatId,
+            'text'    => $text,
+        ], $options);
+
+        $response = Http::post($this->apiUrl('sendMessage'), $payload);
+
+        if (! $response->successful()) {
+            Log::error('Telegram sendMessage failed', [
+                'status'  => $response->status(),
+                'body'    => $response->body(),
+                'payload' => $payload,
+            ]);
         }
-    
-        return $this->request('sendMessage', $payload);
+
+        return $response->json() ?? false;
     }
 
-    public function sendMarkdown(string|int $chatId, string $text): bool|array
+    public function sendMarkdown(string|int $chatId, string $text, array $options = []): bool|array
     {
-        return $this->sendMessage($chatId, $text);
+        return $this->sendMessage($chatId, $text, array_merge([
+            'parse_mode' => 'Markdown',
+        ], $options));
+    }
+
+    public function sendHtml(string|int $chatId, string $text, array $options = []): bool|array
+    {
+        return $this->sendMessage($chatId, $text, array_merge([
+            'parse_mode' => 'HTML',
+        ], $options));
+    }
+
+    public function deleteMessage(string|int $chatId, int $messageId): bool|array
+    {
+        $response = Http::post($this->apiUrl('deleteMessage'), [
+            'chat_id'    => $chatId,
+            'message_id' => $messageId,
+        ]);
+
+        if (! $response->successful()) {
+            Log::warning('Telegram deleteMessage failed', [
+                'status'     => $response->status(),
+                'body'       => $response->body(),
+                'chat_id'    => $chatId,
+                'message_id' => $messageId,
+            ]);
+        }
+
+        return $response->json() ?? false;
     }
 
     public function sendMainMenu(string|int $chatId, string $text): bool|array
@@ -52,9 +83,18 @@ class TelegramBotService
         return $this->sendMessage($chatId, $text, [
             'reply_markup' => [
                 'keyboard' => [
-                    [['text' => '🆕 Package'],        ['text' => '🔑 My Tokens']],
-                    [['text' => '🌐 Domains'],         ['text' => '💬 Support']],
-                    [['text' => '🔒 Privacy Policy'],  ['text' => '📜 Terms of Service']],
+                    [
+                        ['text' => '🆕 Package'],
+                        ['text' => '📊 My Limits'],
+                    ],
+                    [
+                        ['text' => '🌐 Domains'],
+                        ['text' => '💬 Support'],
+                    ],
+                    [
+                        ['text' => '🔒 Privacy Policy'],
+                        ['text' => '📜 Terms of Service'],
+                    ],
                 ],
                 'resize_keyboard'   => true,
                 'one_time_keyboard' => false,
@@ -76,7 +116,7 @@ class TelegramBotService
             'reply_markup' => json_encode($this->mainStatsKeyboard()),
         ]);
 
-        return $response->json();
+        return $response->json() ?? [];
     }
 
     public function editToStatsMenu(string|int $chatId, int $messageId, string $text): array
@@ -89,15 +129,16 @@ class TelegramBotService
             'reply_markup' => json_encode($this->mainStatsKeyboard()),
         ]);
 
-        return $response->json();
+        return $response->json() ?? [];
     }
 
     public function editToWeekMenu(string|int $chatId, int $messageId): array
     {
-        $now        = Carbon::now();
+        $now = Carbon::now();
         $monthStart = $now->copy()->startOfMonth();
 
         $weekButtons = [];
+
         for ($week = 1; $week <= 4; $week++) {
             $weekStart = $monthStart->copy()->addDays(($week - 1) * 7);
 
@@ -105,11 +146,15 @@ class TelegramBotService
                 break;
             }
 
-            $weekEnd    = ($week === 4)
+            $weekEnd = ($week === 4)
                 ? $now->copy()->endOfMonth()
                 : $weekStart->copy()->addDays(6)->endOfDay();
-            $displayEnd = $weekEnd->isAfter($now) ? $now->copy() : $weekEnd->copy();
-            $range      = $weekStart->format('d M') . '–' . $displayEnd->format('d M');
+
+            $displayEnd = $weekEnd->isAfter($now)
+                ? $now->copy()
+                : $weekEnd->copy();
+
+            $range = $weekStart->format('d M') . '–' . $displayEnd->format('d M');
 
             $weekButtons[] = [
                 'text'          => "សប្ដាហ៍ទី {$week} ({$range})",
@@ -117,7 +162,7 @@ class TelegramBotService
             ];
         }
 
-        $rows   = array_chunk($weekButtons, 2);
+        $rows = array_chunk($weekButtons, 2);
         $rows[] = $this->backButton();
 
         $response = Http::post($this->apiUrl('editMessageText'), [
@@ -125,10 +170,12 @@ class TelegramBotService
             'message_id'   => $messageId,
             'text'         => "📆 *ជ្រើសសប្ដាហ៍ — " . $now->format('F Y') . "*",
             'parse_mode'   => 'Markdown',
-            'reply_markup' => json_encode(['inline_keyboard' => $rows]),
+            'reply_markup' => json_encode([
+                'inline_keyboard' => $rows,
+            ]),
         ]);
 
-        return $response->json();
+        return $response->json() ?? [];
     }
 
     public function editToMonthMenu(string|int $chatId, int $messageId, array $monthsWithData): array
@@ -136,23 +183,25 @@ class TelegramBotService
         $now = Carbon::now();
 
         $monthButtons = [];
-        for ($m = 1; $m <= 12; $m++) {
-            if ($m > $now->month) {
+
+        for ($month = 1; $month <= 12; $month++) {
+            if ($month > $now->month) {
                 continue;
             }
 
-            if ($m !== $now->month && ! in_array($m, $monthsWithData, true)) {
+            if ($month !== $now->month && ! in_array($month, $monthsWithData, true)) {
                 continue;
             }
 
-            $label          = Carbon::create($now->year, $m)->translatedFormat('F');
+            $label = Carbon::create($now->year, $month)->translatedFormat('F');
+
             $monthButtons[] = [
                 'text'          => "🗓 {$label}",
-                'callback_data' => BotCallback::STATS_MONTH_PREFIX . $m,
+                'callback_data' => BotCallback::STATS_MONTH_PREFIX . $month,
             ];
         }
 
-        $rows   = array_chunk($monthButtons, 3);
+        $rows = array_chunk($monthButtons, 3);
         $rows[] = $this->backButton();
 
         $response = Http::post($this->apiUrl('editMessageText'), [
@@ -160,15 +209,18 @@ class TelegramBotService
             'message_id'   => $messageId,
             'text'         => "🗓 *ជ្រើសខែ — " . $now->format('Y') . "*",
             'parse_mode'   => 'Markdown',
-            'reply_markup' => json_encode(['inline_keyboard' => $rows]),
+            'reply_markup' => json_encode([
+                'inline_keyboard' => $rows,
+            ]),
         ]);
 
-        return $response->json();
+        return $response->json() ?? [];
     }
 
     public function editToYearMenu(string|int $chatId, int $messageId, array $yearsWithData): array
     {
         $yearButtons = [];
+
         foreach ($yearsWithData as $year) {
             $yearButtons[] = [
                 'text'          => "📊 {$year}",
@@ -176,7 +228,7 @@ class TelegramBotService
             ];
         }
 
-        $rows   = array_chunk($yearButtons, 3);
+        $rows = array_chunk($yearButtons, 3);
         $rows[] = $this->backButton();
 
         $response = Http::post($this->apiUrl('editMessageText'), [
@@ -184,18 +236,19 @@ class TelegramBotService
             'message_id'   => $messageId,
             'text'         => "📊 *ជ្រើសឆ្នាំ*",
             'parse_mode'   => 'Markdown',
-            'reply_markup' => json_encode(['inline_keyboard' => $rows]),
+            'reply_markup' => json_encode([
+                'inline_keyboard' => $rows,
+            ]),
         ]);
 
-        return $response->json();
+        return $response->json() ?? [];
     }
 
-    // ── editMessage now accepts optional inline keyboard ──────────────────────
     public function editMessage(
         string|int $chatId,
-        int        $messageId,
-        string     $text,
-        array      $inlineKeyboard = []   // ← added
+        int $messageId,
+        string $text,
+        array $inlineKeyboard = []
     ): array {
         $payload = [
             'chat_id'    => $chatId,
@@ -212,17 +265,32 @@ class TelegramBotService
             $payload['reply_markup'] = json_encode($this->mainStatsKeyboard());
         }
 
-        return Http::post($this->apiUrl('editMessageText'), $payload)->json();
+        $response = Http::post($this->apiUrl('editMessageText'), $payload);
+
+        if (! $response->successful()) {
+            Log::warning('Telegram editMessage failed', [
+                'status'  => $response->status(),
+                'body'    => $response->body(),
+                'payload' => $payload,
+            ]);
+        }
+
+        return $response->json() ?? [];
     }
 
     public function answerCallbackQuery(string $callbackQueryId, string $text = ''): array
     {
-        $response = Http::post($this->apiUrl('answerCallbackQuery'), [
+        $payload = [
             'callback_query_id' => $callbackQueryId,
-            'text'              => $text,
-        ]);
+        ];
 
-        return $response->json();
+        if ($text !== '') {
+            $payload['text'] = $text;
+        }
+
+        $response = Http::post($this->apiUrl('answerCallbackQuery'), $payload);
+
+        return $response->json() ?? [];
     }
 
     // -------------------------------------------------------------------------
@@ -234,12 +302,24 @@ class TelegramBotService
         return [
             'inline_keyboard' => [
                 [
-                    ['text' => '📅 ថ្ងៃនេះ',   'callback_data' => BotCallback::STATS_DAY],
-                    ['text' => '📆 សប្ដាហ៍នេះ', 'callback_data' => BotCallback::STATS_WEEK],
+                    [
+                        'text'          => '📅 ថ្ងៃនេះ',
+                        'callback_data' => BotCallback::STATS_DAY,
+                    ],
+                    [
+                        'text'          => '📆 សប្ដាហ៍នេះ',
+                        'callback_data' => BotCallback::STATS_WEEK,
+                    ],
                 ],
                 [
-                    ['text' => '🗓 ខែនេះ',     'callback_data' => BotCallback::STATS_MONTH],
-                    ['text' => '📊 ឆ្នាំនេះ',  'callback_data' => BotCallback::STATS_YEAR],
+                    [
+                        'text'          => '🗓 ខែនេះ',
+                        'callback_data' => BotCallback::STATS_MONTH,
+                    ],
+                    [
+                        'text'          => '📊 ឆ្នាំនេះ',
+                        'callback_data' => BotCallback::STATS_YEAR,
+                    ],
                 ],
             ],
         ];
@@ -248,7 +328,10 @@ class TelegramBotService
     private function backButton(): array
     {
         return [
-            ['text' => '◀️ ត្រឡប់ក្រោយ', 'callback_data' => BotCallback::STATS_BACK],
+            [
+                'text'          => '◀️ ត្រឡប់ក្រោយ',
+                'callback_data' => BotCallback::STATS_BACK,
+            ],
         ];
     }
 
@@ -260,25 +343,34 @@ class TelegramBotService
     {
         $url = $url ?: rtrim(config('app.url'), '/') . '/api/telegram/webhook';
 
-        $payload = ['url' => $url, 'drop_pending_updates' => true];
+        $payload = [
+            'url'                  => $url,
+            'drop_pending_updates' => true,
+        ];
 
-        if ($secretToken) {
+        if ($secretToken !== '') {
             $payload['secret_token'] = $secretToken;
         }
 
-        return Http::post($this->apiUrl('setWebhook'), $payload)->json();
+        $response = Http::post($this->apiUrl('setWebhook'), $payload);
+
+        return $response->json() ?? [];
     }
 
     public function webhookInfo(): array
     {
-        return Http::get($this->apiUrl('getWebhookInfo'))->json();
+        $response = Http::get($this->apiUrl('getWebhookInfo'));
+
+        return $response->json() ?? [];
     }
 
     public function deleteWebhook(): array
     {
-        return Http::post($this->apiUrl('deleteWebhook'), [
+        $response = Http::post($this->apiUrl('deleteWebhook'), [
             'drop_pending_updates' => true,
-        ])->json();
+        ]);
+
+        return $response->json() ?? [];
     }
 
     public function isAdmin(string|int $chatId, string|int $userId): bool
@@ -289,6 +381,7 @@ class TelegramBotService
         ])->json();
 
         $status = $response['result']['status'] ?? '';
+
         return in_array($status, ['administrator', 'creator'], true);
     }
 
@@ -299,6 +392,16 @@ class TelegramBotService
     private function request(string $method, array $payload): bool|array
     {
         $response = Http::post($this->apiUrl($method), $payload);
+
+        if (! $response->successful()) {
+            Log::warning('Telegram request failed', [
+                'method'  => $method,
+                'status'  => $response->status(),
+                'body'    => $response->body(),
+                'payload' => $payload,
+            ]);
+        }
+
         return $response->json() ?? false;
     }
 }
