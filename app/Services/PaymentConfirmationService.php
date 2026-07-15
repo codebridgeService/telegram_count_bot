@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Http\Controllers\Api\Telegram\LimitHandler;
+use App\Http\Controllers\Api\Telegram\PackageHandler;
 use App\Models\Package;
 use App\Models\PackageTransaction;
 use App\Models\User;
@@ -25,7 +27,7 @@ final class PaymentConfirmationService
     public function activateFromPackageTransaction(
         PackageTransaction $transaction
     ): UserSubscription {
-        return DB::transaction(
+        $subscription = DB::transaction(
             function () use ($transaction): UserSubscription {
                 /*
                 |--------------------------------------------------------------------------
@@ -152,6 +154,24 @@ final class PaymentConfirmationService
                         carryOver: $paymentCarryOver,
                     );
 
+                /*
+                 * NOTE — business decision, currently option (a):
+                 *
+                 * (a) throw: activation is blocked when the new package
+                 *     allows fewer groups than the user already has
+                 *     connected. The callback then returns 502 and ABA
+                 *     retries — but the state can never repair itself,
+                 *     so the payment stays taken without activation.
+                 *     The bot's packages menu should hide packages with
+                 *     group_limit < connected groups to prevent this.
+                 *
+                 * (b) allow + over-limit: activate anyway with
+                 *     group_used > group_limit. LimitHandler already
+                 *     shows the over-limit warning, and new /connect
+                 *     attempts are blocked until the user removes
+                 *     groups. To switch, replace the call below with a
+                 *     Log::warning.
+                 */
                 $this->ensureGroupLimitSupportsExistingGroups(
                     package: $package,
                     groupsAlreadyUsed: $groupsAlreadyUsed,
@@ -279,6 +299,29 @@ final class PaymentConfirmationService
             },
             attempts: 3
         );
+
+        /*
+        |--------------------------------------------------------------------------
+        | Cache invalidation — AFTER commit
+        |--------------------------------------------------------------------------
+        |
+        | Must run outside the transaction: invalidating inside would let
+        | a concurrent request re-cache the OLD subscription row before
+        | this transaction commits, leaving the bot showing stale limits
+        | (e.g. the old group_limit after upgrading to Enterprise = 4).
+        |
+        | Runs for the idempotent paths too — harmless, and it repairs a
+        | previous activation that crashed before invalidation.
+        */
+
+        $userUuid = (string) $subscription->user_id;
+
+        if ($userUuid !== '') {
+            LimitHandler::invalidateForUser($userUuid);
+            PackageHandler::invalidateSubscription($userUuid);
+        }
+
+        return $subscription;
     }
 
     /**
@@ -548,7 +591,7 @@ final class PaymentConfirmationService
 
     /**
      * Deactivate the previous active subscription after its remaining
-     * payment quota and existing group usage have been transferred.`
+     * payment quota and existing group usage have been transferred.
      */
     private function deactivatePreviousSubscription(
         UserSubscription $subscription
@@ -562,4 +605,3 @@ final class PaymentConfirmationService
             ]);
     }
 }
-

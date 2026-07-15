@@ -7,6 +7,7 @@ namespace App\Http\Controllers\Api\Telegram;
 use App\Constants\BotCallback;
 use App\Models\TelegramGroup;
 use App\Models\TelegramPayment;
+use App\Models\User;
 use App\Models\UserSubscription;
 use App\Services\TelegramBotService;
 use Illuminate\Http\JsonResponse;
@@ -28,6 +29,7 @@ class LimitHandler
     private const TTL_PAY_COUNT    = 60;     // 1 min  — real payment count
     private const TTL_GROUP_LIST   = 60;     // 1 min  — my-groups list
     private const TTL_SCHEMA       = 86400;  // 1 day  — packages PK column detection
+    private const TTL_USER_LOOKUP  = 3600;   // 1 hour — telegram_id → users.uuid
 
     public function __construct(
         protected TelegramBotService $telegram,
@@ -38,9 +40,11 @@ class LimitHandler
     | Cache key builders (public so other services can invalidate too)
     |--------------------------------------------------------------------------
     */
-    public static function latestGroupKey(): string
+    public static function latestGroupKey(string $userId): string
     {
-        return 'limits:latest_group';
+        // Per-user — previously a single global key, which made
+        // My Limits show the most recently connected group of ANY user.
+        return "limits:latest_group:{$userId}";
     }
 
     public static function subscriptionKey(string $userId): string
@@ -63,6 +67,11 @@ class LimitHandler
         return "limits:groups:{$userId}";
     }
 
+    public static function userLookupKey(string $telegramUserId): string
+    {
+        return "limits:tguser:{$telegramUserId}";
+    }
+
     /**
      * Call this from your payment save handler after a new payment is counted,
      * and from PaymentConfirmationService::activatePackage().
@@ -72,7 +81,20 @@ class LimitHandler
         Cache::forget(self::subscriptionKey($userId));
         Cache::forget(self::paymentCountKey($userId));
         Cache::forget(self::groupListKey($userId));
-        Cache::forget(self::latestGroupKey());
+        Cache::forget(self::latestGroupKey($userId));
+    }
+
+    /**
+     * Call this from EVERY admin package write (create/update/delete),
+     * alongside PublicPackageController::invalidate() and
+     * PackageHandler::invalidatePackages().
+     *
+     * Without it, a limit upgrade (e.g. group_limit → 4) stays hidden
+     * from My Limits for up to TTL_PACKAGE (1 hour).
+     */
+    public static function invalidatePackage(string $packageId): void
+    {
+        Cache::forget(self::packageKey($packageId));
     }
 
     public function showLimits(string $chatId, array $from): JsonResponse
@@ -80,9 +102,13 @@ class LimitHandler
         try {
             $telegramUserId = (string) ($from['id'] ?? '');
 
-            $group = $this->getLatestConnectedGroup();
+            $userId = $this->resolveUserId($telegramUserId);
 
-            if (! $group) {
+            $group = $userId !== null
+                ? $this->getLatestConnectedGroup($userId)
+                : null;
+
+            if (! $userId || ! $group) {
                 $this->telegram->sendMessage($chatId,
                     "📊 <b>My Limits</b>\n\n"
                     . "អ្នកមិនទាន់បាន connect group នៅឡើយទេ។\n"
@@ -93,7 +119,7 @@ class LimitHandler
                 return response()->json(['ok' => true]);
             }
 
-            $subscription = $this->getActiveSubscription((string) $group->user_id);
+            $subscription = $this->getActiveSubscription($userId);
 
             if (! $subscription) {
                 $this->telegram->sendMessage($chatId,
@@ -108,30 +134,51 @@ class LimitHandler
 
             $package = $this->findPackage((string) $subscription->package_id);
 
-            $paymentLimit = (int) (
-                $subscription->override_payment_limit
-                ?? ($package->payment_limit ?? 0)
-            );
+            /*
+            |--------------------------------------------------------------------------
+            | Effective limits
+            |--------------------------------------------------------------------------
+            |
+            | FIX #1 — $package can be null (deleted/missing row): use
+            |          nullsafe access so this never crashes.
+            | FIX #2 — a NULL limit means UNLIMITED (matches
+            |          PaymentConfirmationService::isUnlimited*), shown
+            |          as ∞ instead of collapsing to 0.
+            */
 
-            $groupLimit = (int) (
-                $subscription->override_group_limit
-                ?? ($package->group_limit ?? 0)
-            );
+            $rawPaymentLimit = $subscription->override_payment_limit
+                ?? $package?->payment_limit;   // null = unlimited
+
+            $rawGroupLimit = $subscription->override_group_limit
+                ?? $package?->group_limit;     // null = unlimited
 
             $usedGroups = (int) (
                 $subscription->group_used
                 ?? TelegramGroup::query()
-                    ->where('user_id', $group->user_id)
+                    ->where('user_id', $userId)
                     ->where('status', 'connected')
                     ->count()
             );
 
-            $realPaymentCount = $this->getRealPaymentCount((string) $group->user_id);
+            $realPaymentCount = $this->getRealPaymentCount($userId);
 
             $usedPayments = max((int) ($subscription->payment_used ?? 0), $realPaymentCount);
 
-            $remainingGroups = max($groupLimit - $usedGroups, 0);
-            $remainingPayments = max($paymentLimit - $usedPayments, 0);
+            $paymentLimitText = $rawPaymentLimit === null
+                ? '∞'
+                : (string) (int) $rawPaymentLimit;
+
+            $groupLimitText = $rawGroupLimit === null
+                ? '∞'
+                : (string) (int) $rawGroupLimit;
+
+            $remainingPayments = $rawPaymentLimit === null
+                ? '∞'
+                : (string) max((int) $rawPaymentLimit - $usedPayments, 0);
+
+            $remainingGroups = $rawGroupLimit === null
+                ? '∞'
+                : (string) max((int) $rawGroupLimit - $usedGroups, 0);
 
             $packageName = e(
                 $package->name
@@ -144,10 +191,10 @@ class LimitHandler
                 "─────────────────────",
                 "📦 <b>Package:</b> {$packageName}",
                 "",
-                "👥 <b>Groups:</b> {$usedGroups} / {$groupLimit}",
+                "👥 <b>Groups:</b> {$usedGroups} / {$groupLimitText}",
                 "✅ <b>Remaining Groups:</b> {$remainingGroups}",
                 "",
-                "💳 <b>Payments:</b> {$usedPayments} / {$paymentLimit}",
+                "💳 <b>Payments:</b> {$usedPayments} / {$paymentLimitText}",
                 "✅ <b>Remaining Payments:</b> {$remainingPayments}",
                 "─────────────────────",
             ]);
@@ -155,11 +202,11 @@ class LimitHandler
             Log::info('User checked limits', [
                 'chat_id' => $chatId,
                 'telegram_user_id' => $telegramUserId,
-                'user_id' => $group->user_id,
+                'user_id' => $userId,
                 'subscription_id' => $subscription->userSubscriptionsID ?? null,
                 'package_id' => $subscription->package_id,
-                'payment_limit' => $paymentLimit,
-                'group_limit' => $groupLimit,
+                'payment_limit' => $rawPaymentLimit,
+                'group_limit' => $rawGroupLimit,
                 'used_payments' => $usedPayments,
                 'used_groups' => $usedGroups,
             ]);
@@ -208,12 +255,47 @@ class LimitHandler
     |--------------------------------------------------------------------------
     */
 
-    private function getLatestConnectedGroup(): ?TelegramGroup
+    /**
+     * Resolve users.uuid from the Telegram user ID of the person
+     * pressing the button. Null results are NOT cached, so a user who
+     * registers a moment later appears immediately.
+     */
+    private function resolveUserId(string $telegramUserId): ?string
+    {
+        if ($telegramUserId === '') {
+            return null;
+        }
+
+        $cached = Cache::get(self::userLookupKey($telegramUserId));
+
+        if (is_string($cached) && $cached !== '') {
+            return $cached;
+        }
+
+        $uuid = User::query()
+            ->where('telegram_id', $telegramUserId)
+            ->value('uuid');
+
+        if (! is_string($uuid) || $uuid === '') {
+            return null;
+        }
+
+        Cache::put(
+            self::userLookupKey($telegramUserId),
+            $uuid,
+            self::TTL_USER_LOOKUP
+        );
+
+        return $uuid;
+    }
+
+    private function getLatestConnectedGroup(string $userId): ?TelegramGroup
     {
         return Cache::remember(
-            self::latestGroupKey(),
+            self::latestGroupKey($userId),
             self::TTL_GROUP,
             fn () => TelegramGroup::query()
+                ->where('user_id', $userId)
                 ->where('status', 'connected')
                 ->latest()
                 ->first()
@@ -228,7 +310,7 @@ class LimitHandler
             fn () => UserSubscription::query()
                 ->where('user_id', $userId)
                 ->where('status', 'active')
-                ->latest()
+                ->latest('starts_at')
                 ->first()
         );
     }
@@ -296,9 +378,15 @@ class LimitHandler
     public function showMyGroups(string $chatId, array $from): JsonResponse
     {
         try {
-            $group = $this->getLatestConnectedGroup();
+            $telegramUserId = (string) ($from['id'] ?? '');
 
-            if (! $group) {
+            $userId = $this->resolveUserId($telegramUserId);
+
+            $group = $userId !== null
+                ? $this->getLatestConnectedGroup($userId)
+                : null;
+
+            if (! $userId || ! $group) {
                 $this->telegram->sendMessage($chatId,
                     "👥 <b>ក្រុមរបស់ខ្ញុំ</b>\n\n"
                     . "អ្នកមិនទាន់បាន connect group នៅឡើយទេ។\n"
@@ -309,7 +397,7 @@ class LimitHandler
                 return response()->json(['ok' => true]);
             }
 
-            $subscription = $this->getActiveSubscription((string) $group->user_id);
+            $subscription = $this->getActiveSubscription($userId);
 
             if (! $subscription) {
                 $this->telegram->sendMessage($chatId,
@@ -322,11 +410,11 @@ class LimitHandler
             }
 
             $groups = Cache::remember(
-                self::groupListKey((string) $group->user_id),
+                self::groupListKey($userId),
                 self::TTL_GROUP_LIST,
                 fn () => TelegramGroup::query()
-                    ->where(function ($query) use ($group, $subscription) {
-                        $query->where('user_id', $group->user_id)
+                    ->where(function ($query) use ($userId, $subscription) {
+                        $query->where('user_id', $userId)
                             ->orWhere('subscription_id', $subscription->userSubscriptionsID);
                     })
                     ->where('status', 'connected')
@@ -346,18 +434,26 @@ class LimitHandler
 
             $package = $this->findPackage((string) $subscription->package_id);
 
-            $groupLimit = (int) (
-                $subscription->override_group_limit
-                ?? ($package->group_limit ?? 0)
-            );
+            /*
+             * FIX #1 (nullsafe) + FIX #2 (null = unlimited → ∞).
+             */
+            $rawGroupLimit = $subscription->override_group_limit
+                ?? $package?->group_limit;
 
             $usedGroups = $groups->count();
-            $remainingGroups = max($groupLimit - $usedGroups, 0);
+
+            $groupLimitText = $rawGroupLimit === null
+                ? '∞'
+                : (string) (int) $rawGroupLimit;
+
+            $remainingGroups = $rawGroupLimit === null
+                ? '∞'
+                : (string) max((int) $rawGroupLimit - $usedGroups, 0);
 
             $lines = [
                 "👥 <b>ក្រុមរបស់ខ្ញុំ</b>",
                 "─────────────────────",
-                "📊 <b>ប្រើប្រាស់:</b> {$usedGroups} / {$groupLimit}",
+                "📊 <b>ប្រើប្រាស់:</b> {$usedGroups} / {$groupLimitText}",
                 "✅ <b>នៅសល់:</b> {$remainingGroups}",
                 "─────────────────────",
                 "",
@@ -390,7 +486,10 @@ class LimitHandler
                 $lines[] = "";
             }
 
-            if ($usedGroups > $groupLimit) {
+            if (
+                $rawGroupLimit !== null
+                && $usedGroups > (int) $rawGroupLimit
+            ) {
                 $lines[] = "⚠️ <b>Warning:</b> អ្នកប្រើ group លើស limit។";
             }
 
@@ -461,10 +560,43 @@ class LimitHandler
                 return response()->json(['ok' => true]);
             }
 
+            /*
+            |--------------------------------------------------------------------------
+            | FIX #3 — Ownership check
+            |--------------------------------------------------------------------------
+            |
+            | The Remove button is visible to every member of a group
+            | chat, and callback_data can be crafted with any group ID.
+            | Only the group's owner may disconnect it.
+            */
+
+            $requesterUuid = $this->resolveUserId(
+                (string) ($from['id'] ?? '')
+            );
+
+            if (
+                $requesterUuid === null
+                || $requesterUuid !== (string) $group->user_id
+            ) {
+                Log::warning('Unauthorized group removal attempt', [
+                    'chat_id' => $chatId,
+                    'telegram_group_id' => $telegramGroupsID,
+                    'owner_user_id' => $group->user_id,
+                    'requested_by' => $from['id'] ?? null,
+                ]);
+
+                $this->telegram->sendMessage($chatId,
+                    "⚠️ អ្នកមិនមានសិទ្ធិលុប group នេះទេ។\n"
+                    . "មានតែម្ចាស់ package ប៉ុណ្ណោះដែលអាចលុបបាន។"
+                );
+
+                return response()->json(['ok' => true]);
+            }
+
             $subscription = UserSubscription::query()
                 ->where('user_id', $group->user_id)
                 ->where('status', 'active')
-                ->latest()
+                ->latest('starts_at')
                 ->first();
 
             $groupName = e(

@@ -11,6 +11,7 @@ use App\Models\PayWayPayment;
 use App\Services\PaymentConfirmationService;
 use App\Services\PayWay\AbaCheckoutService;
 use App\Services\PayWay\AbaPayWayClient;
+use App\Services\Telegram\PaymentSuccessNotifier;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -22,6 +23,7 @@ final class PayWayCallbackController extends Controller
         private readonly AbaCheckoutService $checkout,
         private readonly AbaPayWayClient $client,
         private readonly PaymentConfirmationService $confirmation,
+        private readonly PaymentSuccessNotifier $notifier,
     ) {}
 
     /**
@@ -286,12 +288,48 @@ final class PayWayCallbackController extends Controller
 
             /*
              * Payment and package activation are already complete.
+             *
+             * FIX #4: always refresh the Telegram package cache here.
+             * If the first callback crashed between attaching the
+             * subscription and invalidating the cache, this repairs
+             * the stale cache on the duplicate callback.
              */
             if (
                 ! empty(
                     $activatedTransaction->subscription_id
                 )
             ) {
+                if (! empty($activatedTransaction->user_id)) {
+                    PackageHandler::invalidateSubscription(
+                        (string) $activatedTransaction->user_id
+                    );
+                }
+
+                return response()->json(['ok' => true]);
+            }
+
+            /*
+             * FIX #2: terminal states — respond 200 so ABA stops
+             * retrying a callback that can never succeed.
+             */
+            if (
+                in_array(
+                    (string) $activatedTransaction->status,
+                    ['failed', 'expired', 'cancelled'],
+                    true
+                )
+            ) {
+                Log::info(
+                    'PayWay callback for terminal transaction',
+                    [
+                        'packageTransactionsID' =>
+                            $activatedTransaction->getKey(),
+
+                        'status' =>
+                            $activatedTransaction->status,
+                    ]
+                );
+
                 return response()->json(['ok' => true]);
             }
 
@@ -348,6 +386,30 @@ final class PayWayCallbackController extends Controller
                 if (! empty($activatedTransaction->user_id)) {
                     PackageHandler::invalidateSubscription(
                         (string) $activatedTransaction->user_id
+                    );
+                }
+
+                /*
+                 * FIX #3: send the Khmer success message to the user.
+                 *
+                 * Never allow a Telegram failure to fail the callback —
+                 * the payment is already safely persisted.
+                 */
+                try {
+                    $this->notifier->notify(
+                        $activatedTransaction,
+                        $subscription
+                    );
+                } catch (Throwable $exception) {
+                    Log::warning(
+                        'Payment success notification failed',
+                        [
+                            'packageTransactionsID' =>
+                                $activatedTransaction->getKey(),
+
+                            'error' =>
+                                $exception->getMessage(),
+                        ]
                     );
                 }
             }
@@ -470,4 +532,3 @@ final class PayWayCallbackController extends Controller
             ->update($updates);
     }
 }
-

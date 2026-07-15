@@ -12,29 +12,6 @@ Route::prefix('v1')
     ->group(function (): void {
         /*
         |--------------------------------------------------------------------------
-        | KHQR checkout
-        |--------------------------------------------------------------------------
-        */
-
-        Route::prefix('khqr')
-            ->name('khqr.')
-            ->controller(PaymentCheckoutApiController::class)
-            ->group(function (): void {
-                Route::get(
-                    '/payment-checkouts/{transactionId}',
-                    'show'
-                )->name('payment-checkouts.show');
-
-                Route::post(
-                    '/payment-checkouts/{transactionId}/check',
-                    'check'
-                )
-                    ->middleware('throttle:30,1')
-                    ->name('payment-checkouts.check');
-            });
-
-        /*
-        |--------------------------------------------------------------------------
         | ABA PayWay
         |--------------------------------------------------------------------------
         */

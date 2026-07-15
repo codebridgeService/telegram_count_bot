@@ -371,4 +371,32 @@ final class AccountHandler
             'UTF-8'
         );
     }
+    public function showPrivacyPolicy(string $chatId): JsonResponse
+    {
+        $privacyUrl = route('privacy-policy');
+
+        $this->telegram->sendMessage(
+            $chatId,
+            "🔒 <b>Privacy Policy</b>\n\n"
+            . "សូមចុចប៊ូតុងខាងក្រោម ដើម្បីអានគោលការណ៍ឯកជនភាពរបស់យើង។",
+            [
+                'parse_mode' => 'HTML',
+                'disable_web_page_preview' => true,
+                'reply_markup' => [
+                    'inline_keyboard' => [
+                        [
+                            [
+                                'text' => '🔒 Open Privacy Policy',
+                                'url' => $privacyUrl,
+                            ],
+                        ],
+                    ],
+                ],
+            ]
+        );
+
+        return response()->json(['ok' => true]);
+    }
+
+   
 }

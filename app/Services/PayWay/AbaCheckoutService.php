@@ -8,6 +8,7 @@ use App\Models\Package;
 use App\Models\PackageTransaction;
 use App\Models\PayWayPayment;
 use App\Models\User;
+use App\Services\Telegram\TelegramMessageCleanup as TelegramTelegramMessageCleanup;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -107,12 +108,7 @@ final class AbaCheckoutService
         );
 
         $description = mb_substr(
-            sprintf(
-                'Package ID: %s. Ref: %s. TG user: %s',
-                (string) $package->packagesID,
-                $merchantReference,
-                (string) $telegramUserId
-            ),
+            $this->asciiPackageLabel($package, $merchantReference),
             0,
             250
         );
@@ -321,10 +317,15 @@ final class AbaCheckoutService
         return $checkoutUrl;
     }
 
-    /**
+   /**
      * Verify using the paid ABA tran_id when available.
      *
-     * Otherwise, inspect the payment-link details.
+     * Payment-link purchases use an ABA-generated tran_id that the
+     * merchant check-transaction API sometimes cannot see (error 6,
+     * "tran_id not found") — especially in sandbox or immediately
+     * after the callback. In that case we fall back to the
+     * payment-link details, which isPaid() also understands
+     * (payment_status / total_trxn).
      */
     public function verifyTransaction(
         PackageTransaction $payment
@@ -338,19 +339,40 @@ final class AbaCheckoutService
             );
         }
 
+        $paymentLinkId = trim(
+            (string) $payment->external_transaction_id
+        );
+
         $abaTransactionId = trim(
             (string) ($payment->aba_tran_id ?? '')
         );
 
         if ($abaTransactionId !== '') {
-            return $this->client->checkTransaction(
-                $abaTransactionId
-            );
-        }
+            try {
+                return $this->client->checkTransaction(
+                    $abaTransactionId
+                );
+            } catch (\Throwable $exception) {
+                // Error 6: tran_id not found — fall through to
+                // the payment-link details when we can.
+                if ($paymentLinkId === '') {
+                    throw $exception;
+                }
 
-        $paymentLinkId = trim(
-            (string) $payment->external_transaction_id
-        );
+                \Illuminate\Support\Facades\Log::info(
+                    'ABA checkTransaction failed, '
+                    .'falling back to payment-link details',
+                    [
+                        'merchant_ref_no' =>
+                            (string) $payment->merchant_ref_no,
+
+                        'aba_tran_id' => $abaTransactionId,
+
+                        'error' => $exception->getMessage(),
+                    ]
+                );
+            }
+        }
 
         if ($paymentLinkId === '') {
             throw new RuntimeException(
@@ -362,7 +384,6 @@ final class AbaCheckoutService
             $paymentLinkId
         );
     }
-
     /**
      * Determine whether the payment is complete.
      */
@@ -520,7 +541,7 @@ final class AbaCheckoutService
     ): ?PackageTransaction {
         $abaTranId = trim((string) $abaTranId);
 
-        return DB::transaction(
+        $paid = DB::transaction(
             function () use (
                 $payment,
                 $abaTranId,
@@ -573,6 +594,21 @@ final class AbaCheckoutService
                     : null;
             }
         );
+
+        /*
+         * Delete the checkout message (QR / pay button) in Telegram.
+         *
+         * Runs AFTER the transaction commits, and only for the winner
+         * of the pending → paid claim — so duplicate callbacks never
+         * try to delete twice. Never throws: a failed delete must not
+         * break payment confirmation.
+         */
+        if ($paid !== null) {
+            app(\App\Services\Telegram\TelegramMessageCleanup::class)
+                ->deleteCheckoutMessage($paid);
+        }
+
+        return $paid;
     }
 
     /**
